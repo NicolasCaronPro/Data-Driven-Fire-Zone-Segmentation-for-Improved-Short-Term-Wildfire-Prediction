@@ -2,7 +2,7 @@
 
 This repository focuses on **watershed-based fire zone segmentation** from rasterized wildfire risk maps.
 
-![Texte alternatif](images/schema.png)
+![Résultat de segmentation (s4, a2, r3)](test_output/pred_s4_a2_r3.png)
 
 ## Abstract
 
