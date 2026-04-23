@@ -1,69 +1,15 @@
-import sys
-from pathlib import Path
 import numpy as np
-import pandas as pd
-import geopandas as gpd
 import matplotlib.pyplot as plt
 import logging
 import math
-from skimage import morphology, filters, measure
+from skimage import morphology, filters
 from skimage.segmentation import watershed
 from scipy import ndimage as ndi
 from scipy.spatial.distance import cdist
-from sklearn.neighbors import KNeighborsRegressor
-from tslearn.clustering import TimeSeriesKMeans
-from sklearn.cluster import KMeans
 from skimage.transform import resize
 
-
-
-# Mock dgl to avoid import errors if not needed
-from unittest.mock import MagicMock
-import types
-dgl_mock = types.ModuleType('dgl')
-dgl_mock.DGLGraph = MagicMock()
-sys.modules['dgl'] = dgl_mock
-
-dgl_nn_mock = types.ModuleType('dgl.nn')
-sys.modules['dgl.nn'] = dgl_nn_mock
-
-dgl_nn_pytorch_mock = types.ModuleType('dgl.nn.pytorch')
-dgl_nn_pytorch_mock.GATConv = MagicMock()
-dgl_nn_pytorch_mock.GraphConv = MagicMock()
-sys.modules['dgl.nn.pytorch'] = dgl_nn_pytorch_mock
-sys.modules['dgl.nn.pytorch.conv'] = MagicMock()
-
-sys.modules['dgl.nn.functional'] = MagicMock()
-sys.modules['dgl.function'] = MagicMock()
-sys.modules['dgl.convert'] = MagicMock()
-
-blitz_mock = types.ModuleType('blitz')
-sys.modules['blitz'] = blitz_mock
-sys.modules['blitz.modules'] = MagicMock()
-sys.modules['blitz.utils'] = MagicMock()
-sys.modules['blitz.losses'] = MagicMock()
-
-sys.modules['pygam'] = MagicMock()
-
-sys.modules['ngboost'] = MagicMock()
-sys.modules['ngboost.distns'] = MagicMock()
-sys.modules['ngboost.scores'] = MagicMock()
-
-skopt_mock = types.ModuleType('skopt')
-skopt_mock.BayesSearchCV = MagicMock()
-skopt_mock.Optimizer = MagicMock()
-sys.modules['skopt'] = skopt_mock
-sys.modules['skopt.space'] = MagicMock()
-
-sys.modules['osmnx'] = MagicMock()
-
-sys.modules['dtaidistance'] = MagicMock()
-sys.modules['dtaidistance.dtw'] = MagicMock()
-
-sys.modules['dtwParallel'] = MagicMock()
-
 from tools import (
-    read_object, save_object, check_and_create_path, relabel_clusters, merge_adjacent_clusters, find_clusters,
+    read_object, save_object, check_and_create_path, merge_adjacent_clusters, find_clusters,
     split_large_clusters, frequency_ratio, order_class, allDates, rootDisk, root_target, Predictor, iou_binary, to_binary_mask
 )
 
@@ -340,52 +286,8 @@ class Segmentation:
             pred = pred.astype(float)
             self._save_feature_image(path, dept, f'{type}_split', pred, raster)
         
-        elif mode == 'fireArea':
-            
-            pred = merge_adjacent_clusters(pred, min_cluster_size=min_cluster_size, max_cluster_size=max_cluster_size,
-            features=None, mode=mode, exclude_label=0, background=-1,
-            nb_attempt=attempt)
-
-            valid_cluster = find_clusters(pred, min_cluster_size, 0, -1)
-            self._save_feature_image(path, dept, 'pred_merge', pred, raster)
-            
-            pred = pred.astype(float)
-            self._save_feature_image(path, dept, f'{type}_split', pred, raster)
-
-        elif mode == 'time_series_similarity':
-            pred = merge_adjacent_clusters(pred, min_cluster_size=min_cluster_size, max_cluster_size=max_cluster_size, mode=mode, features=bin_data, exclude_label=0, background=-1, nb_attempt=attempt)
-            valid_cluster = find_clusters(pred, min_cluster_size, 0, -1)
-            self._save_feature_image(path, dept, f'{type}_merge', pred, raster)
-
-            logger.info(np.unique(pred))
-            logger.info(f'{dept} : We found {len(valid_cluster)} to build geometry.')
-            mask_valid = np.isin(pred, valid_cluster)
-            logger.info(f'Number of fire inside regions {np.nansum(bin_data[mask_valid])}')
-            logger.info(f'Number of fire outside regions {np.nansum(bin_data[~mask_valid])}')
-
-            valid_cluster = [val + 1 for val in valid_cluster]
-            pred[valid_mask] += 1
-            pred = split_large_clusters(pred, max_cluster_size, min_cluster_size, size, valid_cluster)
-            valid_cluster = [val - 1 for val in valid_cluster]
-            pred[valid_mask] -= 1
-
-        elif mode == 'time_series_similarity_fast':
-            pred[~valid_mask] = -1
-            pred = merge_adjacent_clusters(pred, min_cluster_size=min_cluster_size, max_cluster_size=max_cluster_size, mode=mode, features=bin_data, exclude_label=0, background=-1, nb_attempt=attempt)
-            valid_cluster = find_clusters(pred, math.inf, 0, -1)
-            self._save_feature_image(path, dept, f'{type}_merge', pred, raster)
-
-            logger.info(np.unique(pred))
-            logger.info(f'{dept} : We found {len(valid_cluster)} to build geometry.')
-            mask_valid = np.isin(pred, valid_cluster)
-            logger.info(f'Number of fire inside regions {np.nansum(bin_data[mask_valid])}')
-            logger.info(f'Number of fire outside regions {np.nansum(bin_data[~mask_valid])}')
-
-            valid_cluster = [val + 1 for val in valid_cluster]
-            pred[valid_mask] += 1
-            pred = split_large_clusters(pred, max_cluster_size, min_cluster_size, size, valid_cluster)
-            valid_cluster = [val - 1 for val in valid_cluster]
-            pred[valid_mask] -= 1
+        else:
+            raise ValueError(f"Unsupported cluster mode '{mode}'. Only 'size' is supported in the watershed workflow.")
 
         sum_fr = 0
         bin_data_sum = np.nansum(bin_data, axis=2)
@@ -490,40 +392,8 @@ class Segmentation:
             else:
                 data = data[:, :, [allDates.index(date) for date in train_date]]
                 data = np.nansum(data, axis=2)
-        elif vb == 'geometry':
-            width, height = raster.shape[1], raster.shape[0]
-            positions = np.array([[x, y] for y in range(height) for x in range(width)])
-            X_image = np.zeros((height, width), dtype=float)
-            Y_image = np.zeros((height, width), dtype=float)
-            
-            # Remplir les images avec les indices x et y
-            for pos in positions:
-                x, y = pos
-                X_image[y, x] = x  # Indice selon x
-                Y_image[y, x] = y  # Indice selon y
-            
-            X_image[~valid_mask] = np.nan
-            Y_image[~valid_mask] = np.nan
-            res = np.stack((X_image, Y_image), axis=2)
-            return res
         else:
-            dir_encoder = path / 'Encoder'
-            data = read_object(f'{vb}.pkl', dir_data)
-            if data is None:
-                exit(1)
-            if vb == 'foret_landcover':
-                encoder = read_object('encoder_foret.pkl', dir_encoder)
-            elif vb == 'dynamic_world_landcover':
-                encoder = read_object('encoder_landcover.pkl', dir_encoder)
-            else:
-                encoder = None
-
-            if encoder is not None:
-                values = data[valid_mask].reshape(-1)
-                data[valid_mask] = encoder.transform(values).values.reshape(-1)
-
-            if len(data.shape) > 2:
-                data = np.nansum(data, axis=2)
+            raise ValueError(f"Unsupported input variable '{vb}' in watershed-only segmentation flow.")
 
         data[~valid_mask] = np.nan
         if GT is not None:

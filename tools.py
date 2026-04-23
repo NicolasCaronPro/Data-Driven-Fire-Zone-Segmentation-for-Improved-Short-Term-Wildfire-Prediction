@@ -1,17 +1,12 @@
-import os
 import logging
 logger = logging.getLogger(__name__)
 import pickle
 import numpy as np
-import pandas as pd
-import scipy.ndimage as ndi
 from scipy.spatial.distance import cdist
 from skimage import measure, segmentation, morphology
-from skimage.measure import regionprops
 import math
 from pathlib import Path
 from sklearn.cluster import KMeans, DBSCAN
-import geopandas as gpd
 
 # -- Dummy root paths (from arborescence.py) --
 rootDisk = Path('./')

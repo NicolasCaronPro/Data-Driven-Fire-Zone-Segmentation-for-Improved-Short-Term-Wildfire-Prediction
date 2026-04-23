@@ -2,17 +2,15 @@ import matplotlib
 matplotlib.use('Agg')
 print("DEBUG: test_simple_segmentation.py start", flush=True)
 import numpy as np
-import torch
 import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 # Pour importer segmentation depuis le répertoire courant
 sys.path.append(str(Path(__file__).resolve().parent))
 
 from segmentation import Segmentation
-import segmentation
 
 def test_segmentation_with_create_geometry():
     print("DEBUG: Starting test_segmentation_with_create_geometry", flush=True)
