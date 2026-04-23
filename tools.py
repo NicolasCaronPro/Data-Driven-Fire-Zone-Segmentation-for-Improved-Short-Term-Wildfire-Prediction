@@ -1,3 +1,111 @@
+import os
+import logging
+logger = logging.getLogger(__name__)
+import pickle
+import numpy as np
+import pandas as pd
+import scipy.ndimage as ndi
+from scipy.spatial.distance import cdist
+from skimage import measure, segmentation, morphology
+from skimage.measure import regionprops
+import math
+from pathlib import Path
+from sklearn.cluster import KMeans, DBSCAN
+import geopandas as gpd
+
+# -- Dummy root paths (from arborescence.py) --
+rootDisk = Path('./')
+root_target = Path('./')
+
+
+# --- From tools.py --- 
+
+import datetime as dt
+
+def find_dates_between(start, end):
+    start_date = dt.datetime.strptime(start, "%Y-%m-%d").date()
+    end_date = dt.datetime.strptime(end, "%Y-%m-%d").date()
+
+    delta = dt.timedelta(days=1)
+    date = start_date
+    res = []
+    while date <= end_date:
+        res.append(date.strftime("%Y-%m-%d"))
+        date += delta
+    return res
+
+allDates = find_dates_between('2017-06-12', '2025-12-31')
+
+def save_object(obj, filename: str, path: Path):
+    check_and_create_path(path)
+    with open(path / filename, "wb") as outp:  # Overwrites any existing file.
+        pickle.dump(obj, outp, pickle.HIGHEST_PROTOCOL)
+
+def read_object(filename: str, path: Path):
+    if not (path / filename).is_file():
+        logger.info(f"{path / filename} not found")
+        return None
+    return pickle.load(open(path / filename, "rb"))
+
+def check_and_create_path(path: Path):
+    """
+    Creer un dossier s'il n'existe pas
+    """
+    path_way = path.parent if path.is_file() else path
+
+    path_way.mkdir(parents=True, exist_ok=True)
+
+    if not path.exists():
+        path.touch()
+
+def order_class(predictor, pred, min_values=0):
+    res = np.zeros(pred[~np.isnan(pred)].shape[0], dtype=int)
+    cc = predictor.cluster_centers_.reshape(-1)
+    classes = np.arange(cc.shape[0])
+    ind = np.lexsort([cc])
+    cc = cc[ind]
+    classes = classes[ind]
+    for c in range(cc.shape[0]):
+        mask = np.argwhere(pred == classes[c])
+        res[mask] = c
+    return res + min_values
+
+def count_pixels_in_france_deg_square(res_km=2, deg_size=0.25, lat_deg=46.5):
+    """
+    Calcule le nombre de pixels (res_km x res_km) dans un carré deg_size x deg_size degrés,
+    situé au centre de la France (latitude 46.5°N par défaut).
+
+    Args:
+        res_km (float): Taille d’un pixel en kilomètres (par défaut 2 km).
+        deg_size (float): Taille du carré en degrés (par défaut 0.25°).
+        lat_deg (float): Latitude (par défaut 46.5°N, centre de la France).
+
+    Returns:
+        tuple: (n_rows, n_cols, total_pixels)
+    """
+    
+    print('kjehfkjzefknef')
+    
+    # Longueur d’un degré de latitude (quasi constant)
+    km_per_deg_lat = 111.32
+
+    # Longueur d’un degré de longitude dépendant de la latitude
+    # km_per_deg_lon = 111.32 * math.cos(math.radians(lat_deg))
+    km_per_deg_lon = 111.32
+
+    # Dimensions du carré en km
+    height_km = deg_size * km_per_deg_lat
+    width_km = deg_size * km_per_deg_lon
+
+    print(deg_size)
+    
+    # Nombre de pixels
+    n_rows = int(height_km // res_km)
+    n_cols = int(width_km // res_km)
+    total_pixels = n_rows * n_cols
+
+    return n_rows, n_cols, total_pixels
+
 def merge_adjacent_clusters(
     image,
     mode="size",
@@ -70,6 +178,7 @@ def merge_adjacent_clusters(
             find_neighbor = False
             dilated_image = np.copy(res)
             while nb_test < nb_attempt and not find_neighbor:
+                print(f"DEBUG inner: nb_test={nb_test}, label={label}", flush=True)
 
                 # Trouver les voisins du cluster actuel
                 mask_label = dilated_image == label
@@ -272,6 +381,7 @@ def merge_adjacent_clusters(
             mask_label = res == region.label
             mask_before_erosion = np.copy(mask_label)
             while ones > max_cluster_size:
+                print(f"DEBUG erode2: ones={ones}", flush=True)
                 mask_label = morphology.erosion(mask_label, morphology.square(3))
                 ones = np.argwhere(mask_label == 1).shape[0]
 
@@ -283,14 +393,6 @@ def merge_adjacent_clusters(
         i += 1
 
     return res
-
-
-def variance_threshold(df, th):
-    var_thres = VarianceThreshold(threshold=th)
-    var_thres.fit(df)
-    new_cols = var_thres.get_support()
-    return df.iloc[:, new_cols]
-
 
 def find_clusters(image, threshold, clusters_to_ignore=None, background=0):
     """
@@ -330,7 +432,6 @@ def find_clusters(image, threshold, clusters_to_ignore=None, background=0):
             valid_clusters.append(cluster_id)
 
     return valid_clusters
-
 
 def split_large_clusters(
     image, size_threshold, min_cluster_size, wanted_size, background
@@ -391,57 +492,6 @@ def split_large_clusters(
 
     return new_labeled_image
 
-
-def most_frequent_neighbor(image, mask, i, j, non_cluster):
-    """
-    Retourne la valeur la plus fréquente des voisins d'un pixel, en tenant compte d'un masque.
-    """
-    neighbors = []
-    for di in [-1, 0, 1]:
-        for dj in [-1, 0, 1]:
-            if di == 0 and dj == 0:
-                continue
-            ni, nj = i + di, j + dj
-            if (
-                0 <= ni < image.shape[0]
-                and 0 <= nj < image.shape[1]
-                and not mask[ni, nj]
-            ):
-                if non_cluster is not None:
-                    if len(image[ni, nj][image[ni, nj] != non_cluster]) > 0:
-                        neighbors.append(image[ni, nj][image[ni, nj] != non_cluster][0])
-                else:
-                    neighbors.append(image[ni, nj])
-    if neighbors:
-        return Counter(neighbors).most_common(1)[0][0]
-    else:
-        return image[i, j]  # En cas d'absence de voisins valides
-
-
-def merge_small_clusters(image, min_size, non_cluster=None):
-    """
-    Fusionne les petits clusters en remplaçant leurs pixels par la valeur la plus fréquente de leurs voisins.
-    """
-    output_image = np.copy(image)
-    unique_clusters, counts = np.unique(image, return_counts=True)
-    counts = counts[~np.isnan(unique_clusters)]
-    unique_clusters = unique_clusters[~np.isnan(unique_clusters)]
-    for cluster_id, count in zip(unique_clusters, counts):
-        if cluster_id == -1:
-            continue
-        if count < min_size:
-            # Trouver tous les pixels appartenant au cluster
-            mask = image == cluster_id
-            for i in range(image.shape[0]):
-                for j in range(image.shape[1]):
-                    if mask[i, j]:
-                        output_image[i, j] = most_frequent_neighbor(
-                            output_image, mask, i, j, non_cluster
-                        )
-
-    return output_image
-
-
 def relabel_clusters(cluster_labels, started):
     """
     Réorganise les labels des clusters pour qu'ils soient séquentiels et croissants.
@@ -452,3 +502,321 @@ def relabel_clusters(cluster_labels, started):
     for ncl, cl in enumerate(unique_labels):
         relabeled_image[cluster_labels == cl] = ncl + started
     return relabeled_image
+
+def frequency_ratio(values: np.array, mask: np.array):
+    FF_t = np.sum(values)
+    Area_t = len(values)
+    FF_i = np.sum(values[mask])
+
+    if FF_t == 0 or Area_t == 0:
+        return 0
+
+    # Calculer Area_i (le nombre total de pixels pour la classe c)
+    Area_i = mask.shape[0]
+
+    # Calculer FireOcc et Area pour la classe c
+    FireOcc = FF_i / FF_t
+    Area = Area_i / Area_t
+    if Area == 0:
+        return 0
+
+    # Calculer le ratio de fréquence (FR) pour la classe c
+    FR = FireOcc / Area
+
+    return round(FR, 3)
+
+# --- From graph_structure.py --- 
+
+def to_binary_mask(S):
+    """
+    Converts an array to a binary mask where values > 0 become 1 and others become 0.
+    """
+    if S is None:
+        return None
+    return (np.asarray(S) > 0).astype(int)
+
+def iou_binary(maskA, maskB):
+    """
+    Calculates the Intersection over Union (IoU) between two binary masks.
+    """
+    maskA = np.asarray(maskA) > 0
+    maskB = np.asarray(maskB) > 0
+    
+    intersection = np.logical_and(maskA, maskB).sum()
+    union = np.logical_or(maskA, maskB).sum()
+    
+    if union == 0:
+        return 0.0
+    return intersection / union
+
+# --- From weigh_predictor.py --- 
+
+class Predictor():
+    def __init__(self, n_clusters, name='', type='kmeans', eps=0.5, binary=False):
+        if type == 'kmeans':
+            self.model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        elif type == 'dbscan':
+            self.model = DBSCAN(eps=eps)
+        elif type == 'fix':
+            self.model = FixedThresholdPredictor(n_clusters, name, 1 if binary else None)
+        elif type == 'jenks':
+            self.model = JenksThresholdPredictor(n_clusters=n_clusters, name=name)
+
+        self.binary = binary
+        self.bounds = None
+        self.n_clusters = n_clusters
+        self.type = type
+        self.name = name
+
+    def fit(self, X : np.array):
+        self.train_X = X
+        if len(X.shape) == 1:
+            self.model.fit(X.reshape(-1,1))
+            Xpre = self.model.predict(X.reshape(-1,1))
+        else:
+            self.model.fit(X)
+            Xpre = self.model.predict(X)
+
+        if self.type == 'kmeans':
+            self.cluster_centers_ = self.model.cluster_centers_
+        else:
+            self.cluster_centers_= []
+            cls = np.unique(Xpre)
+            for c in cls:
+                mask = np.argwhere(Xpre == c)
+                self.cluster_centers_.append(np.mean(X[mask]))
+            self.cluster_centers_ = np.asarray(self.cluster_centers_)
+                
+        self.histogram = np.bincount(Xpre)
+        self.highNumberClass = np.argwhere(self.histogram == np.max(self.histogram))
+
+    def predict(self, X : np.array, min_class : int = 0):
+        X = X.astype(float)
+        if len(X.shape) == 1:
+            pred = self.model.predict(X.reshape(-1,1)) + min_class
+        else:
+            pred = self.model.predict(X) + min_class
+        mask = self.train_X > np.nanmax(self.train_X)
+        if True in np.unique(mask):
+            pred[mask] += 1
+        return pred
+    
+    def weight(self, c : int):
+        #valueOfClass = self.histogram[c]
+        #valueOfMinClass = self.histogram[self.highNumberClass][:,0][0]
+        #return valueOfMinClass / valueOfClass
+        return c + 1
+    
+    def weight_array(self, array : np.array):
+        lis = [self.weight(c) for c in array]
+        return np.asarray(lis)
+    
+    def get_centroid(self, c : int):
+        if self.binary:
+            return self.bounds[c]
+        return self.model.cluster_centers_[c]
+
+    def log(self, logger = None):
+        if logger is not None:
+            logger.info(f'############# Predictor {self.name} ###############')
+            logger.info('Histogram')
+            logger.info(self.histogram)
+            logger.info('Cluster Centers')
+            logger.info(self.model.cluster_centers_)
+            logger.info(f'####################################')
+        else:
+            print(f'############# Predictor {self.name} ###############')
+            print('Histogram')
+            print(self.histogram)
+            print('Cluster Centers')
+            print(self.model.cluster_centers_)
+            print(f'####################################')
+
+class FixedThresholdPredictor:
+    def __init__(self, n_clusters=5, name='', max_value=None):
+        """
+        Initialise un modèle avec 5 seuils fixes pour les clusters.
+        
+        Args:
+            n_clusters (int): Le nombre de clusters, fixé à 5 pour ce modèle.
+            name (str): Nom du modèle.
+            binary (bool): Toujours True pour ce type de modèle.
+        """
+        self.bounds = None
+        self.n_clusters = n_clusters
+        self.name = name
+        self.cluster_centers_ = None
+        self.histogram = None
+        self.highNumberClass = None
+        self.max_value = max_value
+
+    def fit(self, X: np.array):
+        """
+        Calcule les seuils et génère les clusters en fonction des données X.
+        
+        Args:
+            X (np.array): Tableau 1D de données pour l'entraînement.
+        """
+        # Définir des bornes fixes pour 5 clusters
+        if self.max_value is None:
+            self.max_value = np.max(X)
+
+        self.bounds = np.array([0.0, 0.1, 0.40, 0.64, 0.95, 1.0])
+
+        # Clusteriser les valeurs selon les bornes
+        Xpre = np.zeros(X.shape[0], dtype=int)
+
+        # Appliquer les bornes pour chaque classe
+        for c in range(self.n_clusters):
+            lower_bound = self.bounds[c]
+            upper_bound = self.bounds[c + 1]
+            mask = np.argwhere((X >= self.max_value * lower_bound) & (X < self.max_value * upper_bound))[:, 0]
+            Xpre[mask] = c
+
+        # Pour les valeurs exactement égales au max, assigner au dernier cluster
+        max_mask = np.argwhere(X == self.max_value)[:, 0]
+        Xpre[max_mask] = self.n_clusters - 1
+
+        self.cluster_centers_ = np.zeros(self.n_clusters)
+        for c in range(self.n_clusters):
+            self.cluster_centers_[c] = (self.bounds[c] * self.max_value + self.bounds[c + 1] * self.max_value) / 2
+
+        # Histogramme des points dans chaque cluster
+        self.histogram = np.bincount(Xpre, minlength=self.n_clusters)
+        self.highNumberClass = np.argwhere(self.histogram == np.max(self.histogram))
+
+    def predict(self, X: np.array):
+        """
+        Prédire les classes pour les nouvelles données X.
+        
+        Args:
+            X (np.array): Données à classer.
+        
+        Returns:
+            np.array: Tableau des classes prédites.
+        """
+        pred = np.zeros(X.shape[0], dtype=int)
+
+        # Appliquer les bornes pour chaque classe
+        for c in range(self.n_clusters):
+            lower_bound = self.bounds[c]
+            upper_bound = self.bounds[c + 1]
+            mask = np.argwhere((X >= self.max_value * lower_bound) & (X < self.max_value * upper_bound))[:, 0]
+            pred[mask] = c
+
+        # Pour les valeurs exactement égales au max, assigner au dernier cluster
+        max_mask = np.argwhere(X == self.max_value)[:, 0]
+        pred[max_mask] = self.n_clusters - 1
+
+        return pred
+
+class JenksThresholdPredictor:
+    def __init__(self, n_clusters=5, name='Jenks Natural Breaks'):
+        """
+        Initialise un modèle basé sur la méthode Jenks Natural Breaks.
+        
+        Args:
+            n_clusters (int): Nombre de clusters/classes souhaités.
+            name (str): Nom du modèle.
+        """
+        self.n_clusters = n_clusters
+        self.name = name
+        self.bounds = None
+        self.cluster_centers_ = None
+        self.histogram = None
+
+    def _calculate_jenks_breaks(self, X, n_clusters):
+        """
+        Implémente l'algorithme de Jenks Natural Breaks.
+        
+        Args:
+            X (np.array): Données triées (1D).
+            n_clusters (int): Nombre de classes souhaitées.
+        
+        Returns:
+            np.array: Tableau des bornes calculées (breaks).
+        """
+        data = np.sort(X)
+        n = len(data)
+
+        # Matrices pour la minimisation de la variance intra-classe
+        lower_class_limits = np.zeros((n + 1, n_clusters + 1), dtype=np.float64)
+        variance_combinations = np.zeros((n + 1, n_clusters + 1), dtype=np.float64)
+
+        # Initialisation
+        for i in range(1, n + 1):
+            lower_class_limits[i][1] = 1
+            variance_combinations[i][1] = np.sum((data[:i] - np.mean(data[:i]))**2)
+
+        for k in range(2, n_clusters + 1):
+            for i in range(2, n + 1):
+                best_variance = float("inf")
+                for j in range(1, i):
+                    variance = variance_combinations[j][k - 1] + np.sum((data[j:i] - np.mean(data[j:i]))**2)
+                    if variance < best_variance:
+                        best_variance = variance
+                        lower_class_limits[i][k] = j
+                variance_combinations[i][k] = best_variance
+
+        # Récupération des bornes optimales
+        k = n_clusters
+        breaks = np.zeros(n_clusters + 1)
+        breaks[-1] = data[-1]
+        for i in range(n_clusters - 1, 0, -1):
+            breaks[i] = data[int(lower_class_limits[int(breaks[i + 1])][k]) - 1]
+            k -= 1
+        breaks[0] = data[0]
+
+        return breaks
+
+    def fit(self, X: np.array):
+        """
+        Calcule les seuils Jenks et prépare le modèle pour la prédiction.
+        
+        Args:
+            X (np.array): Tableau 1D de données pour l'entraînement.
+        """
+        if not isinstance(X, np.ndarray):
+            raise ValueError("Les données doivent être un tableau numpy (np.array).")
+
+        # Calculer les bornes via la méthode de Jenks
+        self.bounds = self._calculate_jenks_breaks(X, self.n_clusters)
+
+        # Calcul des centres des clusters
+        self.cluster_centers_ = []
+        for i in range(self.n_clusters):
+            lower_bound = self.bounds[i]
+            upper_bound = self.bounds[i + 1]
+            mask = (X >= lower_bound) & (X < upper_bound)
+            if np.any(mask):
+                self.cluster_centers_.append(np.mean(X[mask]))
+            else:
+                self.cluster_centers_.append((lower_bound + upper_bound) / 2)
+
+        # Histogramme des points dans chaque cluster
+        labels = self.predict(X)
+        self.histogram = np.bincount(labels, minlength=self.n_clusters)
+
+    def predict(self, X: np.array):
+        """
+        Prédire les classes pour les nouvelles données X.
+        
+        Args:
+            X (np.array): Données à classer.
+        
+        Returns:
+            np.array: Tableau des classes prédites.
+        """
+        if self.bounds is None:
+            raise ValueError("Le modèle n'a pas encore été entraîné. Appelez 'fit' d'abord.")
+        
+        pred = np.zeros(X.shape[0], dtype=int)
+        for i in range(self.n_clusters):
+            lower_bound = self.bounds[i]
+            upper_bound = self.bounds[i + 1]
+            mask = (X >= lower_bound) & (X < upper_bound)
+            pred[mask] = i
+        
+        # Assignation des valeurs égales au max dans le dernier cluster
+        pred[X == self.bounds[-1]] = self.n_clusters - 1
+        return pred

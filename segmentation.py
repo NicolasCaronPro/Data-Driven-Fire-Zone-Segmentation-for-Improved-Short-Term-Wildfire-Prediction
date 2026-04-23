@@ -1,3 +1,106 @@
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import logging
+import math
+from skimage import morphology, filters, measure
+from skimage.segmentation import watershed
+from scipy import ndimage as ndi
+from scipy.spatial.distance import cdist
+from sklearn.neighbors import KNeighborsRegressor
+from tslearn.clustering import TimeSeriesKMeans
+from sklearn.cluster import KMeans
+from skimage.transform import resize
+
+
+
+# Mock dgl to avoid import errors if not needed
+from unittest.mock import MagicMock
+import types
+dgl_mock = types.ModuleType('dgl')
+dgl_mock.DGLGraph = MagicMock()
+sys.modules['dgl'] = dgl_mock
+
+dgl_nn_mock = types.ModuleType('dgl.nn')
+sys.modules['dgl.nn'] = dgl_nn_mock
+
+dgl_nn_pytorch_mock = types.ModuleType('dgl.nn.pytorch')
+dgl_nn_pytorch_mock.GATConv = MagicMock()
+dgl_nn_pytorch_mock.GraphConv = MagicMock()
+sys.modules['dgl.nn.pytorch'] = dgl_nn_pytorch_mock
+sys.modules['dgl.nn.pytorch.conv'] = MagicMock()
+
+sys.modules['dgl.nn.functional'] = MagicMock()
+sys.modules['dgl.function'] = MagicMock()
+sys.modules['dgl.convert'] = MagicMock()
+
+blitz_mock = types.ModuleType('blitz')
+sys.modules['blitz'] = blitz_mock
+sys.modules['blitz.modules'] = MagicMock()
+sys.modules['blitz.utils'] = MagicMock()
+sys.modules['blitz.losses'] = MagicMock()
+
+sys.modules['pygam'] = MagicMock()
+
+sys.modules['ngboost'] = MagicMock()
+sys.modules['ngboost.distns'] = MagicMock()
+sys.modules['ngboost.scores'] = MagicMock()
+
+skopt_mock = types.ModuleType('skopt')
+skopt_mock.BayesSearchCV = MagicMock()
+skopt_mock.Optimizer = MagicMock()
+sys.modules['skopt'] = skopt_mock
+sys.modules['skopt.space'] = MagicMock()
+
+sys.modules['osmnx'] = MagicMock()
+
+sys.modules['dtaidistance'] = MagicMock()
+sys.modules['dtaidistance.dtw'] = MagicMock()
+
+sys.modules['dtwParallel'] = MagicMock()
+
+from tools import (
+    read_object, save_object, check_and_create_path, relabel_clusters, merge_adjacent_clusters, find_clusters,
+    split_large_clusters, frequency_ratio, order_class, allDates, rootDisk, root_target, Predictor, iou_binary, to_binary_mask
+)
+
+logger = logging.getLogger(__name__)
+
+def count_pixels_in_france_deg_square(res_km=2, deg_size=0.25, lat_deg=46.5):
+    """
+    Calcule le nombre de pixels (res_km x res_km) dans un carré deg_size x deg_size degrés,
+    situé au centre de la France (latitude 46.5°N par défaut).
+
+    Args:
+        res_km (float): Taille d’un pixel en kilomètres (par défaut 2 km).
+        deg_size (float): Taille du carré en degrés (par défaut 0.25°).
+        lat_deg (float): Latitude (par défaut 46.5°N, centre de la France).
+
+    Returns:
+        tuple: (n_rows, n_cols, total_pixels)
+    """
+    
+    # Longueur d’un degré de latitude (quasi constant)
+    km_per_deg_lat = 111.32
+
+    # Longueur d’un degré de longitude dépendant de la latitude
+    # km_per_deg_lon = 111.32 * math.cos(math.radians(lat_deg))
+    km_per_deg_lon = 111.32
+
+    # Dimensions du carré en km
+    height_km = deg_size * km_per_deg_lat
+    width_km = deg_size * km_per_deg_lon
+
+    # Nombre de pixels
+    n_rows = int(height_km // res_km)
+    n_cols = int(width_km // res_km)
+    total_pixels = n_rows * n_cols
+
+    return n_rows, n_cols, total_pixels
+
 class Segmentation:
     def __init__(self, scale, base, attempt, reduce, tol, susecptibility_variables=None, train_departements=None,
                  resolution='2x2', dataset_name='fire_risk', sinister='firepoint', sinister_encoding='occurence'):
@@ -53,7 +156,6 @@ class Segmentation:
             data = np.nansum(data, axis=2)
 
         if data is None:
-            logger.info(f'Can t find {vb}')
             exit(1)
 
         if self.max_target_value is None:
@@ -69,7 +171,6 @@ class Segmentation:
         # OPTIMISATION NELDER-MEAD (si demandé)
         # ---------------------------------------------------------------------
         if self.attempt == 'search' and self.reduce == 'search':
-            logger.info("Starting Grid Search optimization for (a, r)...")
 
             # Binaire de la vérité terrain
             B_bin = to_binary_mask(data_bin)
@@ -183,8 +284,8 @@ class Segmentation:
         return pred, pred_fz
 
         #logger.info(f'Cluster dispersion {self.dispersions}')
-
-    def create_cluster(self, pred, dept, path, scale, mode, bin_data, raster, valid_mask, type, attempt=None, print=True):
+        
+    def create_cluster(self, pred, dept, path, scale, mode, bin_data, raster, valid_mask, type, attempt=None, doprint=True):
 
         if bin_data.ndim == 2:
             bin_data = np.expand_dims(bin_data, axis=2)
@@ -200,6 +301,7 @@ class Segmentation:
                 size = count_pixels_in_france_deg_square(deg_size=float(f'0.{self.scale}'))[-1]
                 max_cluster_size = int(size + (self.tol * size))
                 min_cluster_size = int(size - (self.tol * size))
+                
                 s = float(f'0.{self.scale}')
             else:
                 size = count_pixels_in_france_deg_square(deg_size=self.scale)[-1]
@@ -209,6 +311,7 @@ class Segmentation:
         else:
             min_cluster_size = 1 + 3 * scale * (scale + 1)
             max_cluster_size = (int)(min_cluster_size * 2.5)
+            size = min_cluster_size
 
         if mode == 'size':
             
@@ -223,7 +326,7 @@ class Segmentation:
 
             logger.info(np.unique(pred))
             mask_valid = np.isin(pred, valid_cluster)
-            if print:
+            if doprint:
                 logger.info(f'{dept} : We found {len(valid_cluster)} to build geometry.')
                 logger.info(f'Number of fire inside regions {np.nansum(bin_data[mask_valid])}')
                 logger.info(f'Number of fire outside regions {np.nansum(bin_data[~mask_valid])}')
@@ -289,14 +392,14 @@ class Segmentation:
         for cluster in valid_cluster:
             fr_cluster = frequency_ratio(bin_data_sum[~np.isnan(bin_data_sum)], np.argwhere((pred[~np.isnan(bin_data_sum)] == cluster)))
             sum_fr += fr_cluster
-            if print:
+            if doprint:
                 logger.info(f'{cluster} frequency ratio -> {fr_cluster}')
         
         if len(valid_cluster) == 0:
             sum_fr = 0
         else:
             sum_fr = sum_fr / len(valid_cluster)
-        if print:
+        if doprint:
             logger.info(f'Mean fr {sum_fr}')
 
         return sum_fr, pred, pred_fz
